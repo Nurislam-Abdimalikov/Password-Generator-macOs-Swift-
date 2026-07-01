@@ -147,6 +147,17 @@ struct GeneratorView: View {
 
     private let lengthPresets = [8, 12, 16, 24, 32, 48, 64]
 
+    // Уникальные почты/логины из истории (для быстрого выбора при сохранении)
+    private var recentLogins: [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for e in vm.history where !e.login.isEmpty {
+            if seen.insert(e.login).inserted { result.append(e.login) }
+            if result.count >= 5 { break }
+        }
+        return result
+    }
+
     private func showToast(_ data: ToastData) {
         toastWork?.cancel()
         withAnimation(.spring(response: 0.4, dampingFraction: 0.75)) { toast = data }
@@ -173,6 +184,10 @@ struct GeneratorView: View {
 
     private func openSaveSheet() {
         saveSite = ""; saveLogin = ""; saveNote = ""
+        #if os(macOS)
+        // Пытаемся подставить сайт из активной вкладки браузера.
+        if let site = BrowserURL.currentSiteDomain() { saveSite = site }
+        #endif
         showSaveSheet = true
     }
 
@@ -269,6 +284,20 @@ struct GeneratorView: View {
             VStack(alignment: .leading, spacing: 10) {
                 labeledField("Сайт / сервис", "например, jutsu.net", text: $saveSite)
                 labeledField("Логин / почта", "например, arzbt111@gmail.com", text: $saveLogin)
+                if !recentLogins.isEmpty {
+                    HStack(spacing: 6) {
+                        Text("Недавние:").font(.caption2).foregroundColor(.secondary)
+                        ForEach(recentLogins, id: \.self) { login in
+                            Button(login) { saveLogin = login }
+                                .buttonStyle(.plain)
+                                .font(.caption2)
+                                .padding(.horizontal, 8).padding(.vertical, 3)
+                                .background(Brand.accent.opacity(0.18), in: Capsule())
+                                .overlay(Capsule().stroke(Brand.accent.opacity(0.4), lineWidth: 1))
+                        }
+                        Spacer()
+                    }
+                }
                 labeledField("Заметка (необязательно)", "например, основной аккаунт", text: $saveNote)
             }
 

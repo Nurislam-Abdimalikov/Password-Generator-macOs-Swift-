@@ -388,7 +388,8 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				AUTOMATION_APPLE_EVENTS = NO;
+				AUTOMATION_APPLE_EVENTS = YES;
+				INFOPLIST_KEY_NSAppleEventsUsageDescription = "KeyForge подставляет адрес сайта из активной вкладки браузера, чтобы не вводить его вручную при сохранении пароля.";
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
@@ -447,7 +448,8 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				AUTOMATION_APPLE_EVENTS = NO;
+				AUTOMATION_APPLE_EVENTS = YES;
+				INFOPLIST_KEY_NSAppleEventsUsageDescription = "KeyForge подставляет адрес сайта из активной вкладки браузера, чтобы не вводить его вручную при сохранении пароля.";
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
