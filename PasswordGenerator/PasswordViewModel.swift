@@ -23,7 +23,9 @@ final class PasswordViewModel: ObservableObject {
 
     // Профиль / PIN-код / биометрия
     @Published var isUnlocked = false
-    @Published var storedPIN: String = ""
+    // PIN хранится только как солёный SHA-256 хеш — открытый код нигде не сохраняется.
+    private var pinHash: String = ""
+    private var pinSalt: Data = Data()
 
     // Тема оформления
     @Published var theme: AppTheme = .neon {
@@ -34,7 +36,9 @@ final class PasswordViewModel: ObservableObject {
     }
 
     private let historyKey = "password_history"
-    private let pinKey = "user_pin"
+    private let pinKey = "user_pin"          // legacy: открытый PIN (для миграции старых версий)
+    private let pinHashKey = "user_pin_hash"
+    private let pinSaltKey = "user_pin_salt"
     private let themeKey = "app_theme"
 
     static let words = ["apple","river","stone","cloud","tiger","ocean","forest","ember",
@@ -58,28 +62,52 @@ final class PasswordViewModel: ObservableObject {
 
     var strength: PasswordStrength { PasswordStrength.evaluate(password) }
 
-    var hasPIN: Bool { !storedPIN.isEmpty }
+    var hasPIN: Bool { !pinHash.isEmpty }
 
     func setPIN(_ pin: String) {
-        storedPIN = pin
-        Keychain.saveString(pin, for: pinKey)
+        let salt = PINHasher.newSalt()
+        pinSalt = salt
+        pinHash = PINHasher.hash(pin, salt: salt)
+        Keychain.save(salt, for: pinSaltKey)
+        Keychain.saveString(pinHash, for: pinHashKey)
         isUnlocked = true
     }
 
     func unlock(with pin: String) -> Bool {
-        if pin == storedPIN { isUnlocked = true; return true }
+        guard hasPIN else { return false }
+        let candidate = PINHasher.hash(pin, salt: pinSalt)
+        // Сравнение без утечки времени по длине совпадения.
+        guard candidate.count == pinHash.count else { return false }
+        var diff: UInt8 = 0
+        for (a, b) in zip(candidate.utf8, pinHash.utf8) { diff |= a ^ b }
+        if diff == 0 { isUnlocked = true; return true }
         return false
     }
 
     func lock() { isUnlocked = false }
 
     func resetPIN() {
-        storedPIN = ""
+        pinHash = ""
+        pinSalt = Data()
+        Keychain.delete(pinHashKey)
+        Keychain.delete(pinSaltKey)
         Keychain.delete(pinKey)
         isUnlocked = false
     }
 
-    private func loadPIN() { storedPIN = Keychain.readString(pinKey) ?? "" }
+    private func loadPIN() {
+        if let hash = Keychain.readString(pinHashKey), let salt = Keychain.read(pinSaltKey), !hash.isEmpty {
+            pinHash = hash
+            pinSalt = salt
+            return
+        }
+        // Миграция: если остался открытый PIN от старой версии — пересолить и захешировать.
+        if let legacy = Keychain.readString(pinKey), !legacy.isEmpty {
+            setPIN(legacy)
+            isUnlocked = false
+            Keychain.delete(pinKey)
+        }
+    }
 
     // Биометрия
     var canUseBiometrics: Bool {
@@ -136,9 +164,9 @@ final class PasswordViewModel: ObservableObject {
         let all = Array(sets.joined())
         func makePassword() -> String {
             var chars: [Character] = []
-            for set in sets { if let c = set.randomElement() { chars.append(c) } }
-            while chars.count < total { if let c = all.randomElement() { chars.append(c) } }
-            return String(chars.shuffled())
+            for set in sets { if let c = SecureRandom.element(Array(set)) { chars.append(c) } }
+            while chars.count < total { if let c = SecureRandom.element(all) { chars.append(c) } }
+            return String(SecureRandom.shuffled(chars))
         }
         var newPassword = makePassword(); var attempts = 0
         while newPassword == password && attempts < 5 { newPassword = makePassword(); attempts += 1 }
@@ -149,8 +177,8 @@ final class PasswordViewModel: ObservableObject {
         let count = max(3, Int(wordCount))
         func makePhrase() -> String {
             var parts: [String] = []
-            for _ in 0..<count { parts.append((Self.words.randomElement() ?? "secure").capitalized) }
-            return parts.joined(separator: "-") + "-\(Int.random(in: 10...99))"
+            for _ in 0..<count { parts.append((SecureRandom.element(Self.words) ?? "secure").capitalized) }
+            return parts.joined(separator: "-") + "-\(SecureRandom.int(in: 10...99))"
         }
         var phrase = makePhrase(); var attempts = 0
         while phrase == password && attempts < 5 { phrase = makePhrase(); attempts += 1 }
