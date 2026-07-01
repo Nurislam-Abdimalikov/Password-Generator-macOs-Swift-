@@ -2,9 +2,43 @@ import SwiftUI
 
 // MARK: - Модель записи истории
 struct PasswordEntry: Identifiable, Codable {
-    var id = UUID()
+    var id: UUID = UUID()
     let password: String
     let date: Date
+    // Контекст: где использован пароль
+    var site: String = ""      // сайт/сервис, напр. jutsu.net
+    var login: String = ""     // логин или почта, использованные при регистрации
+    var note: String = ""      // произвольная заметка
+
+    init(password: String, date: Date = Date(), site: String = "", login: String = "", note: String = "") {
+        self.password = password
+        self.date = date
+        self.site = site
+        self.login = login
+        self.note = note
+    }
+
+    // Обратная совместимость: старые записи без новых полей корректно декодируются.
+    enum CodingKeys: String, CodingKey { case id, password, date, site, login, note }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? c.decode(UUID.self, forKey: .id)) ?? UUID()
+        password = try c.decode(String.self, forKey: .password)
+        date = (try? c.decode(Date.self, forKey: .date)) ?? Date()
+        site = (try? c.decode(String.self, forKey: .site)) ?? ""
+        login = (try? c.decode(String.self, forKey: .login)) ?? ""
+        note = (try? c.decode(String.self, forKey: .note)) ?? ""
+    }
+
+    // Для поиска
+    func matches(_ query: String) -> Bool {
+        guard !query.isEmpty else { return true }
+        let q = query.lowercased()
+        return site.lowercased().contains(q)
+            || login.lowercased().contains(q)
+            || note.lowercased().contains(q)
+            || password.lowercased().contains(q)
+    }
 }
 
 // MARK: - Уровни надёжности

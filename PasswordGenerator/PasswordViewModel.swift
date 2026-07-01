@@ -21,11 +21,47 @@ final class PasswordViewModel: ObservableObject {
     @Published var excludeSimilar = false
     @Published var wordCount: Double = 4
 
+    // Свой набор символов
+    @Published var customSymbols: String = "!@#$%^&*()-_=+[]{};:,.<>?" {
+        didSet { UserDefaults.standard.set(customSymbols, forKey: symbolsKey) }
+    }
+
+    // Поиск по истории
+    @Published var searchQuery: String = ""
+    var filteredHistory: [PasswordEntry] { history.filter { $0.matches(searchQuery) } }
+
+    // Настройки безопасности/удобства
+    @Published var autoClearClipboard: Bool = true {
+        didSet { UserDefaults.standard.set(autoClearClipboard, forKey: clipClearKey) }
+    }
+    @Published var clipboardClearSeconds: Double = 30 {
+        didSet { UserDefaults.standard.set(clipboardClearSeconds, forKey: clipSecKey) }
+    }
+    @Published var autoLockEnabled: Bool = true {
+        didSet { UserDefaults.standard.set(autoLockEnabled, forKey: autoLockKey); armAutoLock() }
+    }
+    @Published var autoLockMinutes: Double = 2 {
+        didSet { UserDefaults.standard.set(autoLockMinutes, forKey: autoLockMinKey); armAutoLock() }
+    }
+    @Published var launchAtLogin: Bool = false {
+        didSet { if launchAtLogin != oldValue { SystemIntegration.setLaunchAtLogin(launchAtLogin) } }
+    }
+    @Published var menuBarOnly: Bool = false {
+        didSet {
+            UserDefaults.standard.set(menuBarOnly, forKey: menuBarKey)
+            SystemIntegration.setMenuBarOnly(menuBarOnly)
+        }
+    }
+
     // Профиль / PIN-код / биометрия
-    @Published var isUnlocked = false
+    @Published var isUnlocked = false { didSet { armAutoLock() } }
     // PIN хранится только как солёный SHA-256 хеш — открытый код нигде не сохраняется.
     private var pinHash: String = ""
     private var pinSalt: Data = Data()
+
+    // Служебное
+    private var clipboardChangeCount: Int = -1
+    private var autoLockWork: DispatchWorkItem?
 
     // Тема оформления
     @Published var theme: AppTheme = .neon {
@@ -40,6 +76,12 @@ final class PasswordViewModel: ObservableObject {
     private let pinHashKey = "user_pin_hash"
     private let pinSaltKey = "user_pin_salt"
     private let themeKey = "app_theme"
+    private let symbolsKey = "custom_symbols"
+    private let clipClearKey = "clip_autoclear"
+    private let clipSecKey = "clip_seconds"
+    private let autoLockKey = "autolock_enabled"
+    private let autoLockMinKey = "autolock_minutes"
+    private let menuBarKey = "menu_bar_only"
 
     static let words = ["apple","river","stone","cloud","tiger","ocean","forest","ember",
                         "comet","maple","amber","frost","lunar","quartz","raven","solar",
@@ -49,15 +91,30 @@ final class PasswordViewModel: ObservableObject {
 
     init() {
         loadTheme()
+        loadSettings()
         loadHistory()
         loadPIN()
         generate()
+        observeAppLifecycle()
     }
 
     private func loadTheme() {
         if let raw = UserDefaults.standard.string(forKey: themeKey),
            let t = AppTheme(rawValue: raw) { theme = t }
         Brand.activeTheme = theme
+    }
+
+    private func loadSettings() {
+        let d = UserDefaults.standard
+        if let s = d.string(forKey: symbolsKey), !s.isEmpty { customSymbols = s }
+        if d.object(forKey: clipClearKey) != nil { autoClearClipboard = d.bool(forKey: clipClearKey) }
+        if d.object(forKey: clipSecKey) != nil { clipboardClearSeconds = d.double(forKey: clipSecKey) }
+        if d.object(forKey: autoLockKey) != nil { autoLockEnabled = d.bool(forKey: autoLockKey) }
+        if d.object(forKey: autoLockMinKey) != nil { autoLockMinutes = d.double(forKey: autoLockMinKey) }
+        // Автозапуск: источник истины — сама система.
+        launchAtLogin = SystemIntegration.launchAtLoginEnabled
+        // Режим меню-бара: восстановить и применить.
+        menuBarOnly = d.bool(forKey: menuBarKey)
     }
 
     var strength: PasswordStrength { PasswordStrength.evaluate(password) }
@@ -151,7 +208,10 @@ final class PasswordViewModel: ObservableObject {
         if useLowercase { sets.append("abcdefghijklmnopqrstuvwxyz") }
         if useUppercase { sets.append("ABCDEFGHIJKLMNOPQRSTUVWXYZ") }
         if useNumbers  { sets.append("0123456789") }
-        if useSymbols  { sets.append("!@#$%^&*()-_=+[]{};:,.<>?") }
+        if useSymbols {
+            let symbols = customSymbols.isEmpty ? "!@#$%^&*()-_=+[]{};:,.<>?" : customSymbols
+            sets.append(symbols)
+        }
 
         if excludeSimilar {
             let banned = Set("O0o1lI")
@@ -185,34 +245,68 @@ final class PasswordViewModel: ObservableObject {
         password = phrase
     }
 
-    func copyToClipboard() {
+    // Копирует в буфер обмена (без авто-перегенерации — чтобы можно было сохранить
+    // ровно тот пароль, что вставил на сайте). Регенерация — только по кнопке.
+    func copyToClipboard() { setClipboard(password) }
+
+    func copy(_ entry: PasswordEntry) { setClipboard(entry.password) }
+
+    private func setClipboard(_ value: String) {
+        guard !value.isEmpty else { return }
         #if os(macOS)
         let pb = NSPasteboard.general
         pb.clearContents()
-        pb.setString(password, forType: .string)
+        pb.setString(value, forType: .string)
+        clipboardChangeCount = pb.changeCount
         #else
-        UIPasteboard.general.string = password
+        UIPasteboard.general.string = value
         #endif
-        // После копирования генерируем новый пароль
-        generate()
+        scheduleClipboardClear(value)
     }
 
-    func saveCurrent() {
+    // Стирает буфер спустя заданное время, но только если там всё ещё наш пароль.
+    private func scheduleClipboardClear(_ value: String) {
+        guard autoClearClipboard else { return }
+        let delay = max(5, clipboardClearSeconds)
+        #if os(macOS)
+        let expectedCount = clipboardChangeCount
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            let pb = NSPasteboard.general
+            if pb.changeCount == expectedCount, pb.string(forType: .string) == value {
+                pb.clearContents()
+            }
+        }
+        #else
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            if UIPasteboard.general.string == value { UIPasteboard.general.string = "" }
+        }
+        #endif
+    }
+
+    // Сохранить текущий пароль вместе с контекстом (сайт, логин/почта, заметка).
+    func saveCurrent(site: String = "", login: String = "", note: String = "") {
         guard !password.isEmpty else { return }
-        history.insert(PasswordEntry(password: password, date: Date()), at: 0)
+        let entry = PasswordEntry(password: password, date: Date(),
+                                  site: site.trimmingCharacters(in: .whitespacesAndNewlines),
+                                  login: login.trimmingCharacters(in: .whitespacesAndNewlines),
+                                  note: note.trimmingCharacters(in: .whitespacesAndNewlines))
+        history.insert(entry, at: 0)
         persistHistory()
-        // После сохранения сразу сгенерировать новый пароль
+        noteActivity()
+        // Готовим новый пароль для следующей регистрации
         generate()
     }
 
-    func copy(_ entry: PasswordEntry) {
-        #if os(macOS)
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        pb.setString(entry.password, forType: .string)
-        #else
-        UIPasteboard.general.string = entry.password
-        #endif
+    // Обновить метаданные существующей записи.
+    func updateEntry(_ entry: PasswordEntry, site: String, login: String, note: String) {
+        guard let idx = history.firstIndex(where: { $0.id == entry.id }) else { return }
+        var updated = history[idx]
+        updated.site = site.trimmingCharacters(in: .whitespacesAndNewlines)
+        updated.login = login.trimmingCharacters(in: .whitespacesAndNewlines)
+        updated.note = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        history[idx] = updated
+        persistHistory()
+        noteActivity()
     }
 
     func deleteEntry(_ entry: PasswordEntry) {
@@ -221,6 +315,46 @@ final class PasswordViewModel: ObservableObject {
     }
 
     func clearHistory() { history.removeAll(); persistHistory() }
+
+    // Полная замена истории (используется при импорте бэкапа).
+    func replaceHistory(_ entries: [PasswordEntry]) {
+        history = entries
+        persistHistory()
+    }
+
+    // Слияние истории при импорте: добавляем только отсутствующие записи.
+    @discardableResult
+    func mergeHistory(_ entries: [PasswordEntry]) -> Int {
+        let existing = Set(history.map { $0.id })
+        let newOnes = entries.filter { !existing.contains($0.id) }
+        history.insert(contentsOf: newOnes, at: 0)
+        history.sort { $0.date > $1.date }
+        persistHistory()
+        return newOnes.count
+    }
+
+    // MARK: - Авто-блокировка
+
+    func noteActivity() { armAutoLock() }
+
+    private func armAutoLock() {
+        autoLockWork?.cancel()
+        guard isUnlocked, autoLockEnabled else { return }
+        let minutes = max(0.5, autoLockMinutes)
+        let work = DispatchWorkItem { [weak self] in self?.lock() }
+        autoLockWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + minutes * 60, execute: work)
+    }
+
+    private func observeAppLifecycle() {
+        #if os(macOS)
+        NotificationCenter.default.addObserver(forName: NSApplication.willResignActiveNotification,
+                                               object: nil, queue: .main) { [weak self] _ in
+            guard let self else { return }
+            if self.autoLockEnabled { self.lock() }
+        }
+        #endif
+    }
 
     private func persistHistory() {
         if let data = try? JSONEncoder().encode(history) { Keychain.save(data, for: historyKey) }
