@@ -145,6 +145,9 @@ struct GeneratorView: View {
     @State private var breach: BreachResult?
     @State private var checking = false
 
+    // Диагностика автоопределения сайта
+    @State private var siteDetectError: String?
+
     private let lengthPresets = [8, 12, 16, 24, 32, 48, 64]
 
     // Уникальные почты/логины из истории (для быстрого выбора при сохранении)
@@ -184,11 +187,19 @@ struct GeneratorView: View {
 
     private func openSaveSheet() {
         saveSite = ""; saveLogin = ""; saveNote = ""
-        #if os(macOS)
-        // Пытаемся подставить сайт из активной вкладки браузера.
-        if let site = BrowserURL.currentSiteDomain() { saveSite = site }
-        #endif
+        detectSite()
         showSaveSheet = true
+    }
+
+    private func detectSite() {
+        siteDetectError = nil
+        #if os(macOS)
+        let result = BrowserURL.currentSite()
+        if let domain = result.domain { saveSite = domain }
+        else { siteDetectError = result.error }
+        #else
+        siteDetectError = "Автоопределение сайта доступно только на macOS."
+        #endif
     }
 
     private func commitSave() {
@@ -282,7 +293,20 @@ struct GeneratorView: View {
             }
 
             VStack(alignment: .leading, spacing: 10) {
-                labeledField("Сайт / сервис", "например, jutsu.net", text: $saveSite)
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Сайт / сервис").font(.caption).foregroundColor(.secondary)
+                        Spacer()
+                        Button { detectSite() } label: {
+                            Label("Определить из браузера", systemImage: "arrow.clockwise").font(.caption2)
+                        }.buttonStyle(.borderless)
+                    }
+                    TextField("например, jutsu.net", text: $saveSite).textFieldStyle(.roundedBorder)
+                    if let siteDetectError {
+                        Text("⚠️ \(siteDetectError)").font(.caption2).foregroundColor(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
                 labeledField("Логин / почта", "например, arzbt111@gmail.com", text: $saveLogin)
                 if !recentLogins.isEmpty {
                     HStack(spacing: 6) {
